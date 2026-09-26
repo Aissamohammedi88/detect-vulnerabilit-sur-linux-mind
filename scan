@@ -1,0 +1,755 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════
+# NEXUS LINUX MINT VULNERABILITY SCANNER
+# Scan complet de vulnerabilites sur Linux Mint / Ubuntu.
+# Detecte : paquets obsoletes, CVE, services, ports, permissions,
+# SSH, sudo, kernel, malware, rootkits, configs dangereuses.
+# Auteur : Aissa Mohammedi (DGK)
+# Licence : NEXUS-OPEN-2.0
+# Version : 1.0.0
+# ═══════════════════════════════════════════════════════════════════
+
+# PAS de set -e — on continue toujours
+
+VERSION="1.0.0"
+AUTEUR="Aissa Mohammedi (DGK)"
+OUT="$HOME/nexus_scan"
+RAPPORT="$OUT/rapport_$(date +%Y%m%d_%H%M%S).md"
+JSON="$OUT/rapport_$(date +%Y%m%d_%H%M%S).json"
+LOG="$OUT/scan.log"
+
+mkdir -p "$OUT"
+mkdir -p "$OUT/raw"
+
+# Couleurs
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok() { echo -e "${GREEN}[OK]${NC} $1"; }
+warn() { echo -e "${YELLOW}[!!]${NC} $1"; }
+err() { echo -e "${RED}[CRIT]${NC} $1"; }
+info() { echo -e "${CYAN}[i]${NC} $1"; }
+title() { echo -e "\n${BOLD}${CYAN}═══ $1 ═══${NC}"; }
+
+# Log
+log() {
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG" >/dev/null
+}
+
+# Compteur de problemes
+CRITICAL=0
+HIGH=0
+MEDIUM=0
+LOW=0
+INFO=0
+
+add_finding() {
+local sev="$1"
+local cat="$2"
+local msg="$3"
+case "$sev" in
+CRITICAL) CRITICAL=$((CRITICAL+1)) ;;
+HIGH) HIGH=$((HIGH+1)) ;;
+MEDIUM) MEDIUM=$((MEDIUM+1)) ;;
+LOW) LOW=$((LOW+1)) ;;
+*) INFO=$((INFO+1)) ;;
+esac
+echo "[$sev] [$cat] $msg" >> "$RAPPORT"
+log "[$sev] $msg"
+}
+
+# ═══════════════════════════════════════════════════════════════════
+# DEBUT
+# ═══════════════════════════════════════════════════════════════════
+
+clear
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║ NEXUS LINUX MINT VULNERABILITY SCANNER ║"
+echo "║ Auteur : Aissa Mohammedi (DGK) — v$VERSION ║"
+echo "║ Licence : NEXUS-OPEN-2.0 ║"
+echo "╚══════════════════════════════════════════════════════════════╝"
+echo ""
+echo "Date : $(date)"
+echo "Hostname : $(hostname)"
+echo "User : $(whoami)"
+echo "Rapport : $RAPPORT"
+echo ""
+
+# Init rapport
+cat > "$RAPPORT" << EOF
+# NEXUS VULNERABILITY SCAN — $(date)
+
+**Auteur :** $AUTEUR
+**Version :** $VERSION
+**Hostname :** $(hostname)
+**User :** $(whoami)
+**Date :** $(date)
+
+---
+
+EOF
+
+# ═══════════════════════════════════════════════════════════════════
+# 1. INFO SYSTEME
+# ═══════════════════════════════════════════════════════════════════
+
+title "1. INFO SYSTEME"
+
+OS_INFO=$(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'"' -f2)
+KERNEL=$(uname -r)
+ARCH=$(uname -m)
+CPU=$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d':' -f2 | xargs)
+UPTIME=$(uptime -p 2>/dev/null || uptime)
+
+echo "OS : $OS_INFO"
+echo "Kernel : $KERNEL"
+echo "Arch : $ARCH"
+echo "CPU : $CPU"
+echo "Uptime : $UPTIME"
+
+cat >> "$RAPPORT" << EOF
+## Systeme
+
+- OS : $OS_INFO
+- Kernel : $KERNEL
+- Arch : $ARCH
+- CPU : $CPU
+- Uptime : $UPTIME
+
+EOF
+
+# ═══════════════════════════════════════════════════════════════════
+# 2. PAQUETS OBSOLETES
+# ═══════════════════════════════════════════════════════════════════
+
+title "2. PAQUETS OBSOLETES"
+
+info "Verification des mises a jour..."
+
+if command -v apt >/dev/null 2>&1; then
+sudo apt update -qq 2>/dev/null
+
+UPDATABLE=$(apt list --upgradable 2>/dev/null | grep -v "^Listing" | wc -l)
+SECURITY=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
+
+if [ "$UPDATABLE" -gt 0 ]; then
+warn "$UPDATABLE paquets a mettre a jour"
+add_finding "MEDIUM" "PACKAGES" "$UPDATABLE paquets obsoletes"
+
+echo "" >> "$RAPPORT"
+echo "## Paquets obsoletes ($UPDATABLE total, $SECURITY securite)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+apt list --upgradable 2>/dev/null | head -30 >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+else
+ok "Tous les paquets sont a jour"
+fi
+
+if [ "$SECURITY" -gt 0 ]; then
+err "$SECURITY mises a jour de SECURITE en attente"
+add_finding "HIGH" "PACKAGES" "$SECURITY mises a jour securite en attente"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 3. KERNEL OBSOLETE
+# ═══════════════════════════════════════════════════════════════════
+
+title "3. KERNEL"
+
+KERNELS=$(dpkg -l 2>/dev/null | grep "linux-image" | grep "^ii" | awk '{print $2}')
+KERNEL_COUNT=$(echo "$KERNELS" | wc -l)
+
+echo "Kernels installes : $KERNEL_COUNT"
+echo "$KERNELS"
+
+if [ "$KERNEL_COUNT" -gt 3 ]; then
+warn "$KERNEL_COUNT kernels installes — nettoyer"
+add_finding "LOW" "KERNEL" "$KERNEL_COUNT kernels installes (nettoyage recommande)"
+fi
+
+echo "" >> "$RAPPORT"
+echo "## Kernels installes ($KERNEL_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$KERNELS" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. PORTS OUVERTS
+# ═══════════════════════════════════════════════════════════════════
+
+title "4. PORTS OUVERTS"
+
+if command -v ss >/dev/null 2>&1; then
+PORTS=$(ss -tuln 2>/dev/null | grep LISTEN)
+elif command -v netstat >/dev/null 2>&1; then
+PORTS=$(netstat -tuln 2>/dev/null | grep LISTEN)
+else
+PORTS=""
+fi
+
+PORT_COUNT=$(echo "$PORTS" | grep -v "^$" | wc -l)
+echo "Ports en ecoute : $PORT_COUNT"
+echo "$PORTS" | head -20
+
+# Ports dangereux
+DANGEROUS_PORTS="21 23 25 111 135 139 445 512 513 514 2049 3306 3389 5432 5900 6379 27017"
+
+for port in $DANGEROUS_PORTS; do
+if echo "$PORTS" | grep -q ":$port "; then
+err "Port $port ouvert — dangereux"
+add_finding "HIGH" "PORT" "Port $port en ecoute"
+fi
+done
+
+# Ports ouverts sur 0.0.0.0
+EXPOSED=$(echo "$PORTS" | grep "0.0.0.0" | wc -l)
+if [ "$EXPOSED" -gt 0 ]; then
+warn "$EXPOSED ports exposes sur 0.0.0.0"
+fi
+
+echo "" >> "$RAPPORT"
+echo "## Ports ouverts ($PORT_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$PORTS" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. SERVICES ACTIFS
+# ═══════════════════════════════════════════════════════════════════
+
+title "5. SERVICES ACTIFS"
+
+if command -v systemctl >/dev/null 2>&1; then
+SERVICES=$(systemctl list-units --type=service --state=running 2>/dev/null | grep ".service" | awk '{print $1}')
+SVC_COUNT=$(echo "$SERVICES" | grep -v "^$" | wc -l)
+echo "Services actifs : $SVC_COUNT"
+echo "$SERVICES" | head -20
+
+# Services dangereux
+for svc in telnet vsftpd proftpd pure-ftpd rsh rlogin rexec tftp snmpd xinetd; do
+if echo "$SERVICES" | grep -q "$svc"; then
+err "Service dangereux actif : $svc"
+add_finding "HIGH" "SERVICE" "Service $svc actif"
+fi
+done
+
+echo "" >> "$RAPPORT"
+echo "## Services actifs ($SVC_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$SERVICES" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 6. UTILISATEURS ET SUDO
+# ═══════════════════════════════════════════════════════════════════
+
+title "6. UTILISATEURS ET PERMISSIONS"
+
+info "Verification des utilisateurs..."
+
+USERS=$(cat /etc/passwd | grep -E "/bin/(bash|sh|zsh)$" | cut -d: -f1)
+USER_COUNT=$(echo "$USERS" | wc -l)
+echo "Utilisateurs avec shell : $USER_COUNT"
+echo "$USERS"
+
+# Utilisateurs UID 0 (root)
+ROOT_USERS=$(awk -F: '$3==0 {print $1}' /etc/passwd)
+ROOT_COUNT=$(echo "$ROOT_USERS" | wc -l)
+
+if [ "$ROOT_COUNT" -gt 1 ]; then
+err "$ROOT_COUNT comptes UID 0 (root) — anormal"
+add_finding "CRITICAL" "USERS" "$ROOT_COUNT comptes UID 0"
+echo "$ROOT_USERS"
+else
+ok "Un seul compte root"
+fi
+
+# Sudoers
+info "Verification sudoers..."
+
+if [ -f /etc/sudoers ]; then
+# NOPASSWD
+NOPASSWD=$(sudo grep -r "NOPASSWD" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | wc -l)
+if [ "$NOPASSWD" -gt 0 ]; then
+warn "$NOPASSWD entrees NOPASSWD dans sudoers"
+add_finding "MEDIUM" "SUDO" "$NOPASSWD entrees NOPASSWD"
+fi
+
+# ALL=(ALL) sans mot de passe
+ALL_ALL=$(sudo grep -r "ALL=(ALL)" /etc/sudoers /etc/sudoers.d/ 2>/dev/null | grep -v "^#" | wc -l)
+echo "Regles ALL=(ALL) : $ALL_ALL"
+fi
+
+# Groupes sudo
+SUDO_GROUP=$(getent group sudo 2>/dev/null | cut -d: -f4)
+echo "Utilisateurs dans sudo : $SUDO_GROUP"
+
+# Comptes sans mot de passe
+info "Verification des comptes sans mot de passe..."
+NO_PASS=$(sudo awk -F: '($2==""){print $1}' /etc/shadow 2>/dev/null)
+if [ -n "$NO_PASS" ]; then
+err "Comptes sans mot de passe :"
+echo "$NO_PASS"
+add_finding "CRITICAL" "USERS" "Comptes sans mot de passe : $NO_PASS"
+fi
+
+echo "" >> "$RAPPORT"
+echo "## Utilisateurs et permissions" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo "- Utilisateurs avec shell : $USER_COUNT" >> "$RAPPORT"
+echo "- Comptes UID 0 : $ROOT_COUNT" >> "$RAPPORT"
+echo "- Utilisateurs sudo : $SUDO_GROUP" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+
+# ═══════════════════════════════════════════════════════════════════
+# 7. SSH
+# ═══════════════════════════════════════════════════════════════════
+
+title "7. CONFIGURATION SSH"
+
+SSHD_CONFIG="/etc/ssh/sshd_config"
+
+if [ -f "$SSHD_CONFIG" ]; then
+info "Verification SSH..."
+
+# PermitRootLogin
+ROOT_LOGIN=$(grep -E "^PermitRootLogin" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}')
+if [ "$ROOT_LOGIN" = "yes" ]; then
+err "SSH : PermitRootLogin = yes"
+add_finding "CRITICAL" "SSH" "PermitRootLogin active"
+elif [ -z "$ROOT_LOGIN" ]; then
+warn "SSH : PermitRootLogin non defini (default: prohibit-password)"
+else
+ok "SSH : PermitRootLogin = $ROOT_LOGIN"
+fi
+
+# PasswordAuthentication
+PASS_AUTH=$(grep -E "^PasswordAuthentication" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}')
+if [ "$PASS_AUTH" = "yes" ]; then
+warn "SSH : PasswordAuthentication = yes (cle recommandee)"
+add_finding "MEDIUM" "SSH" "PasswordAuthentication active"
+else
+ok "SSH : PasswordAuthentication = $PASS_AUTH"
+fi
+
+# Port SSH
+SSH_PORT=$(grep -E "^Port" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}')
+if [ -z "$SSH_PORT" ]; then
+SSH_PORT=22
+fi
+echo "SSH Port : $SSH_PORT"
+
+# Empty passwords
+EMPTY_PASS=$(grep -E "^PermitEmptyPasswords" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}')
+if [ "$EMPTY_PASS" = "yes" ]; then
+err "SSH : PermitEmptyPasswords = yes"
+add_finding "CRITICAL" "SSH" "PermitEmptyPasswords active"
+fi
+
+# Protocol
+X11=$(grep -E "^X11Forwarding" "$SSHD_CONFIG" 2>/dev/null | awk '{print $2}')
+if [ "$X11" = "yes" ]; then
+warn "SSH : X11Forwarding = yes"
+add_finding "LOW" "SSH" "X11Forwarding active"
+fi
+
+echo "" >> "$RAPPORT"
+echo "## SSH" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo "- PermitRootLogin : $ROOT_LOGIN" >> "$RAPPORT"
+echo "- PasswordAuthentication : $PASS_AUTH" >> "$RAPPORT"
+echo "- Port : $SSH_PORT" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+else
+info "SSH non installe"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 8. FIREWALL
+# ═══════════════════════════════════════════════════════════════════
+
+title "8. FIREWALL"
+
+if command -v ufw >/dev/null 2>&1; then
+UFW_STATUS=$(sudo ufw status 2>/dev/null | head -1)
+if echo "$UFW_STATUS" | grep -q "active"; then
+ok "UFW actif"
+sudo ufw status verbose 2>/dev/null | tee -a "$RAPPORT"
+
+echo "" >> "$RAPPORT"
+echo "## Firewall UFW" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+sudo ufw status verbose >> "$RAPPORT" 2>&1
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+else
+err "UFW inactif — pas de firewall"
+add_finding "HIGH" "FIREWALL" "UFW inactif"
+fi
+else
+warn "UFW non installe"
+add_finding "MEDIUM" "FIREWALL" "Aucun firewall detecte"
+fi
+
+# iptables
+if command -v iptables >/dev/null 2>&1; then
+IPTABLES_RULES=$(sudo iptables -L 2>/dev/null | grep -c "^ACCEPT\|^DROP\|^REJECT")
+echo "Regles iptables : $IPTABLES_RULES"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 9. FICHIERS SUID/SGID
+# ═══════════════════════════════════════════════════════════════════
+
+title "9. FICHIERS SUID/SGID"
+
+info "Recherche des binaires SUID/SGID (peut prendre 30s)..."
+
+SUID_FILES=$(sudo find / -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | grep -v "^/proc" | grep -v "^/sys")
+
+SUID_COUNT=$(echo "$SUID_FILES" | grep -v "^$" | wc -l)
+echo "Fichiers SUID/SGID : $SUID_COUNT"
+
+# Binaires SUID suspects (pas dans /usr/bin ou /bin)
+SUSPECTS=$(echo "$SUID_FILES" | grep -v "^/usr/bin" | grep -v "^/bin" | grep -v "^/usr/lib" | grep -v "^/usr/sbin" | grep -v "^/sbin")
+SUSPECT_COUNT=$(echo "$SUSPECTS" | grep -v "^$" | wc -l)
+
+if [ "$SUSPECT_COUNT" -gt 0 ]; then
+warn "$SUSPECT_COUNT binaires SUID suspects"
+echo "$SUSPECTS" | head -10
+add_finding "MEDIUM" "SUID" "$SUSPECT_COUNT binaires SUID hors /usr/bin"
+fi
+
+# Binaires SUID dangereux connus
+for bin in nmap vim vi find bash sh cp mv tar rsync python python3 perl ruby; do
+if echo "$SUID_FILES" | grep -q "/$bin$"; then
+err "SUID sur binaire dangereux : $bin"
+add_finding "CRITICAL" "SUID" "SUID sur $bin"
+fi
+done
+
+echo "" >> "$RAPPORT"
+echo "## Fichiers SUID/SGID ($SUID_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$SUID_FILES" | head -50 >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+
+# ═══════════════════════════════════════════════════════════════════
+# 10. FICHIERS MONDE-ECRITURE
+# ═══════════════════════════════════════════════════════════════════
+
+title "10. FICHIERS MONDE-ECRITURE"
+
+info "Recherche fichiers modifiables par tous (limite 30s)..."
+
+WORLD_WRITABLE=$(sudo find /etc /usr /bin /sbin /var -type f -perm -o+w 2>/dev/null | head -50)
+WW_COUNT=$(echo "$WORLD_WRITABLE" | grep -v "^$" | wc -l)
+
+if [ "$WW_COUNT" -gt 0 ]; then
+warn "$WW_COUNT fichiers monde-ecriture dans systemes"
+add_finding "MEDIUM" "PERMS" "$WW_COUNT fichiers monde-ecriture"
+
+echo "" >> "$RAPPORT"
+echo "## Fichiers monde-ecriture ($WW_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$WORLD_WRITABLE" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+fi
+
+# Fichiers /etc/passwd /etc/shadow permissions
+if [ -f /etc/passwd ]; then
+PASSWD_PERMS=$(stat -c "%a" /etc/passwd)
+if [ "$PASSWD_PERMS" != "644" ]; then
+err "/etc/passwd permissions anormales : $PASSWD_PERMS"
+add_finding "HIGH" "PERMS" "/etc/passwd : $PASSWD_PERMS"
+fi
+fi
+
+if [ -f /etc/shadow ]; then
+SHADOW_PERMS=$(sudo stat -c "%a" /etc/shadow 2>/dev/null)
+if [ "$SHADOW_PERMS" != "640" ] && [ "$SHADOW_PERMS" != "600" ]; then
+err "/etc/shadow permissions anormales : $SHADOW_PERMS"
+add_finding "CRITICAL" "PERMS" "/etc/shadow : $SHADOW_PERMS"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 11. CRON JOBS SUSPECTS
+# ═══════════════════════════════════════════════════════════════════
+
+title "11. CRON JOBS"
+
+CRON_FILES=$(sudo find /etc/cron* /var/spool/cron 2>/dev/null -type f)
+CRON_COUNT=$(echo "$CRON_FILES" | grep -v "^$" | wc -l)
+echo "Fichiers cron : $CRON_COUNT"
+
+# Chercher commandes suspectes
+SUSPECT_CRON=$(sudo grep -rE "(curl|wget|nc |netcat|bash -c|/tmp/|/dev/shm/)" /etc/cron* /var/spool/cron 2>/dev/null | grep -v "^#" | head -20)
+if [ -n "$SUSPECT_CRON" ]; then
+warn "Cron jobs suspects trouves :"
+echo "$SUSPECT_CRON"
+add_finding "HIGH" "CRON" "Commandes suspectes dans cron"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 12. PROCESSUS SUSPECTS
+# ═══════════════════════════════════════════════════════════════════
+
+title "12. PROCESSUS"
+
+info "Verification des processus..."
+
+# Processus avec chemin suspect
+SUSPECT_PROCS=$(ps aux 2>/dev/null | grep -E "/tmp/|/dev/shm/|/var/tmp/" | grep -v grep)
+if [ -n "$SUSPECT_PROCS" ]; then
+err "Processus dans /tmp ou /dev/shm :"
+echo "$SUSPECT_PROCS"
+add_finding "HIGH" "PROCESS" "Processus dans /tmp"
+fi
+
+# Processus avec noms suspects
+for name in "miner" "xmrig" "coinhive" "cryptonight" "kworkerds" "kthreaddi" "watchdogs"; do
+if pgrep -f "$name" >/dev/null 2>&1; then
+err "Processus suspect : $name"
+add_finding "CRITICAL" "MALWARE" "Processus $name detecte"
+fi
+done
+
+ok "Processus verifies"
+
+# ═══════════════════════════════════════════════════════════════════
+# 13. CLAMAV (si installe)
+# ═══════════════════════════════════════════════════════════════════
+
+title "13. ANTIVIRUS"
+
+if command -v clamscan >/dev/null 2>&1; then
+info "ClamAV installe, scan rapide de /home..."
+SCAN_RESULT=$(clamscan -r --infected --no-summary "$HOME" 2>/dev/null | head -20)
+if [ -n "$SCAN_RESULT" ]; then
+err "Fichiers infectes trouves :"
+echo "$SCAN_RESULT"
+add_finding "CRITICAL" "MALWARE" "ClamAV : infections detectees"
+else
+ok "ClamAV : aucun virus"
+fi
+else
+warn "ClamAV non installe"
+info "Installation : sudo apt install clamav"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 14. ROOTKITS
+# ═══════════════════════════════════════════════════════════════════
+
+title "14. ROOTKITS"
+
+if command -v rkhunter >/dev/null 2>&1; then
+info "rkhunter disponible, verification..."
+sudo rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null | head -30
+if [ $? -eq 0 ]; then
+ok "rkhunter termine"
+fi
+else
+info "rkhunter non installe (optionnel)"
+info "Installation : sudo apt install rkhunter"
+fi
+
+if command -v chkrootkit >/dev/null 2>&1; then
+info "chkrootkit disponible"
+sudo chkrootkit 2>/dev/null | grep -i "INFECTED\|Vulnerable" | head -10
+else
+info "chkrootkit non installe (optionnel)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 15. MOTS DE PASSE FAIBLES (via john the ripper si dispo)
+# ═══════════════════════════════════════════════════════════════════
+
+title "15. MOTS DE PASSE"
+
+# Extraire les hashes shadow (root only)
+if sudo test -r /etc/shadow; then
+USERS_WITH_PASS=$(sudo awk -F: '($2 != "" && $2 != "!" && $2 != "*" && $2 !~ /^!/){print $1}' /etc/shadow 2>/dev/null | wc -l)
+echo "Comptes avec mot de passe : $USERS_WITH_PASS"
+
+# Age des mots de passe
+OLD_PASSWORDS=$(sudo awk -F: '($3 != "" && $3 > 365){print $1}' /etc/shadow 2>/dev/null | wc -l)
+if [ "$OLD_PASSWORDS" -gt 0 ]; then
+warn "$OLD_PASSWORDS comptes avec mot de passe > 1 an"
+add_finding "MEDIUM" "PASSWORD" "$OLD_PASSWORDS mots de passe anciens"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 16. MISES A JOUR DE SECURITE
+# ═══════════════════════════════════════════════════════════════════
+
+title "16. MISES A JOUR SECURITE"
+
+if command -v apt >/dev/null 2>&1; then
+SEC_UPDATES=$(apt list --upgradable 2>/dev/null | grep -i security | wc -l)
+echo "Mises a jour securite : $SEC_UPDATES"
+
+if [ "$SEC_UPDATES" -gt 0 ]; then
+err "$SEC_UPDATES mises a jour de securite en attente"
+add_finding "HIGH" "UPDATES" "$SEC_UPDATES MAJ securite en attente"
+
+echo "" >> "$RAPPORT"
+echo "## Mises a jour securite ($SEC_UPDATES)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+apt list --upgradable 2>/dev/null | grep -i security >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+else
+ok "Toutes les MAJ securite sont installees"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 17. CONNEXIONS RESEAU ACTIVES
+# ═══════════════════════════════════════════════════════════════════
+
+title "17. CONNEXIONS RESEAU"
+
+if command -v ss >/dev/null 2>&1; then
+CONNECTIONS=$(ss -tnp 2>/dev/null | grep ESTAB | head -20)
+CONN_COUNT=$(echo "$CONNECTIONS" | grep -v "^$" | wc -l)
+echo "Connexions etablies : $CONN_COUNT"
+echo "$CONNECTIONS" | head -10
+
+echo "" >> "$RAPPORT"
+echo "## Connexions etablies ($CONN_COUNT)" >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "$CONNECTIONS" >> "$RAPPORT"
+echo '```' >> "$RAPPORT"
+echo "" >> "$RAPPORT"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 18. LOGS SUSPECTS
+# ═══════════════════════════════════════════════════════════════════
+
+title "18. LOGS"
+
+# Failed sudo
+FAILED_SUDO=$(sudo grep "sudo:" /var/log/auth.log 2>/dev/null | grep "incorrect password" | wc -l)
+if [ "$FAILED_SUDO" -gt 10 ]; then
+warn "$FAILED_SUDO tentatives sudo ratees"
+add_finding "MEDIUM" "LOGS" "$FAILED_SUDO echecs sudo"
+fi
+
+# Failed SSH
+FAILED_SSH=$(sudo grep "Failed password" /var/log/auth.log 2>/dev/null | wc -l)
+if [ "$FAILED_SSH" -gt 50 ]; then
+err "$FAILED_SSH tentatives SSH ratees — attaque ?"
+add_finding "HIGH" "LOGS" "$FAILED_SSH echecs SSH"
+fi
+
+ok "Logs verifies"
+
+# ═══════════════════════════════════════════════════════════════════
+# 19. VERIFICATION INTEGRITE PAQUETS
+# ═══════════════════════════════════════════════════════════════════
+
+title "19. INTEGRITE PAQUETS"
+
+info "Verification deintegrite (debsums si dispo)..."
+
+if command -v debsums >/dev/null 2>&1; then
+BROKEN=$(sudo debsums -c 2>/dev/null | wc -l)
+if [ "$BROKEN" -gt 0 ]; then
+warn "$BROKEN fichiers modifies par rapport aux paquets"
+add_finding "MEDIUM" "INTEGRITY" "$BROKEN fichiers modifies"
+else
+ok "Integrite des paquets OK"
+fi
+else
+info "debsums non installe (optionnel)"
+info "Installation : sudo apt install debsums"
+fi
+
+# ═══════════════════════════════════════════════════════════════════
+# 20. RESUME FINAL
+# ═══════════════════════════════════════════════════════════════════
+
+title "RESUME FINAL"
+
+TOTAL=$((CRITICAL + HIGH + MEDIUM + LOW + INFO))
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║ RESUME DU SCAN ║"
+echo "╠══════════════════════════════════════════════════════════════╣"
+printf "║ %-20s : %5d ║\n" "CRITICAL" "$CRITICAL"
+printf "║ %-20s : %5d ║\n" "HIGH" "$HIGH"
+printf "║ %-20s : %5d ║\n" "MEDIUM" "$MEDIUM"
+printf "║ %-20s : %5d ║\n" "LOW" "$LOW"
+printf "║ %-20s : %5d ║\n" "INFO" "$INFO"
+printf "║ %-20s : %5d ║\n" "TOTAL" "$TOTAL"
+echo "╚══════════════════════════════════════════════════════════════╝"
+
+cat >> "$RAPPORT" << EOF
+
+---
+
+## Resume final
+
+| Severite | Nombre |
+|----------|--------|
+| CRITICAL | $CRITICAL |
+| HIGH | $HIGH |
+| MEDIUM | $MEDIUM |
+| LOW | $LOW |
+| INFO | $INFO |
+| **TOTAL** | **$TOTAL** |
+
+---
+
+**Scan termine :** $(date)
+**Auteur :** $AUTEUR
+**Version :** $VERSION
+**Licence :** NEXUS-OPEN-2.0
+
+EOF
+
+echo ""
+echo "Rapport complet : $RAPPORT"
+echo "Log : $LOG"
+echo ""
+
+if [ "$CRITICAL" -gt 0 ]; then
+err "$CRITICAL problemes CRITIQUES — action immediate requise"
+fi
+if [ "$HIGH" -gt 0 ]; then
+warn "$HIGH problemes HAUTS — corriger rapidement"
+fi
+
+echo ""
+echo "Pour lire le rapport :"
+echo " cat $RAPPORT"
+echo ""
+echo "Pour voir les problemes critiques uniquement :"
+echo " grep CRITICAL $RAPPORT"
+echo ""
